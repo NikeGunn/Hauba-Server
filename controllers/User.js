@@ -1,4 +1,4 @@
-import { User } from "../models/users.js";
+import { User, Item } from "../models/users.js";
 import { sendMail } from "../utils/sendMail.js";
 import { sendToken } from "../utils/sendToken.js";
 import cloudinary from "cloudinary";
@@ -37,7 +37,29 @@ export const register = async (req, res) => {
       otp_expiry: new Date(Date.now() + process.env.OTP_EXPIRE * 60 * 1000),
     });
 
-    await sendMail(email, "Verify your account", `Your OTP is ${otp}`);
+    const emailSubject = "Welcome to Haubaa - Verify Your Account";
+    const emailBody = `
+      <p>Dear ${name},</p>
+      
+      <p>Congratulations! You're one step away from unlocking the full potential of your Haubaa account. We're thrilled to have you on board.</p>
+      
+      <p>To ensure the security of your account, please verify your email address by entering the following OTP (One-Time Password) within the next 30 minutes:</p>
+      
+      <h3>Your OTP: ${otp}</h3>
+      
+      <p>This OTP is valid for 30 minutes only, so please make sure to complete the verification process promptly.</p>
+      
+      <p>If you did not create an account with Haubaa, please disregard this email. Your account's security is important to us, and we appreciate your attention to this matter.</p>
+      
+      <p>Thank you for choosing Haubaa! We look forward to providing you with a seamless and secure experience.</p>
+      
+
+      <h4>Best regards,</h4>
+      <p>The Haubaa Team</p>
+    `;
+
+    // Use the email content in your sendMail function
+    await sendMail(email, emailSubject, emailBody);
 
     sendToken(
       res,
@@ -120,46 +142,205 @@ export const logout = async (req, res) => {
   }
 };
 
-export const addTask = async (req, res) => {
+//Add task with cloudinary image upload with title, price, category, description
+export const addListing = async (req, res) => {
   try {
-    const { title, description } = req.body;
+    const { title, price, category, description } = req.body;
+    const image = req.files && req.files.image && req.files.image.tempFilePath;
+
+    // Validate that all required fields are provided
+    if (!title || !price || !category || !description || !image) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide all required fields",
+      });
+    }
 
     const user = await User.findById(req.user._id);
 
-    user.tasks.push({
+    // Upload the image to Cloudinary
+    const mycloud = await cloudinary.v2.uploader.upload(image);
+
+    fs.rmSync("./tmp", { recursive: true });
+
+    // Create an image object with Cloudinary details
+    const imageObject = {
+      public_id: mycloud.public_id,
+      url: mycloud.secure_url,
+    };
+
+    // Add the image object to the user's task
+    const newTask = new Item({
       title,
+      price,
+      category,
+      seller: user._id,
       description,
-      completed: false,
+      images: [imageObject], // Add the image to the 'images' array
       createdAt: new Date(Date.now()),
     });
+
+    // Add the new task to the user's tasks array
+
+    await newTask.save();
+
+    user.items.push(newTask);
 
     await user.save();
 
     res.status(200).json({ success: true, message: "Task added successfully" });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    console.error("Error in addTask:", error);
+    res.status(500).json({ success: false, message: "Internal server error" });
   }
 };
 
-export const removeTask = async (req, res) => {
+// Get all tasks from the server
+export const getAllListings = async (req, res) => {
   try {
+    // Get all listings from the database
+    const items = await Item.find({}).populate("seller");
+
+    res.status(200).json({ success: true, items }); // Respond with 'items'
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message }); // Respond with 'message'
+  }
+};
+
+// Retrieve user's listings
+export const getUserListings = async (req, res) => {
+  try {
+    const userId = req.user._id; // Assuming you have user authentication middleware
+
+    const listings = await Item.find({ seller: userId }).exec();
+    res.json(listings);
+  } catch (err) {
+    res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+// Retrieve a single user's listing
+export const getSingleItemListings = async (req, res) => {
+  try {
+    const id = req.params._id;
+
+    // Get the item from the database
+    const item = await Item.find({ id });
+
+    if (!item) {
+      return res.status(404).json({ error: "Item not found" });
+    }
+
+    res.json(item);
+  } catch (err) {
+    res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+// Update the user listing's details (title, price)
+export const updateUserListing = async (req, res) => {
+  try {
+    const userId = req.user._id; // Assuming you're using user authentication
+    const { id } = req.params; // Assuming you pass the item ID as a URL parameter
+
+    // Verify that the item belongs to the user
+    const item = await Item.findOne({ _id: id, seller: userId }).exec();
+    if (!item) {
+      return res.status(404).json({
+        error: "Item not found or you don't have permission to update it",
+      });
+    }
+    // Update the item details
+    if (req.body.title) item.title = req.body.title;
+    if (req.body.price) item.price = req.body.price;
+
+    // Save the updated item to the database
+    await item.save();
+
+    res.json({ message: "Item updated successfully" });
+  } catch (err) {
+    res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+// Delete a user's listing
+export const deleteUserListing = async (req, res) => {
+  try {
+    const userId = req.user._id; // Assuming you're using user authentication
+    const { id } = req.params; // Assuming you pass the item ID as a URL parameter
+
+    // Verify that the item belongs to the user
+    const item = await Item.findOne({ _id: id, seller: userId }).exec();
+    if (!item) {
+      return res.status(404).json({
+        error: "Item not found or you don't have permission to delete it",
+      });
+    }
+
+    // Delete the item from Cloudinary
+    await cloudinary.v2.uploader.destroy(item.images[0].public_id);
+
+    // Delete the item from the database
+    await item.remove();
+
+    //Remove the item from the user's items array
+    await User.findByIdAndUpdate(userId, { $pull: { items: id } }).exec();
+
+    res.json({ message: "Item deleted successfully" });
+  } catch (err) {
+    res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+//Get a single task from the server
+export const getSingleTask = async (req, res) => {
+  try {
+    // Get the item ID from the request parameters
     const { taskId } = req.params;
 
-    const user = await User.findById(req.user._id);
+    // Get the item from the database
+    const task = await User.findById(taskId);
 
-    user.tasks = user.tasks.filter(
-      (task) => task._id.toString() !== taskId.toString()
-    );
-
-    await user.save();
-
-    res
-      .status(200)
-      .json({ success: true, message: "Task removed successfully" });
+    res.status(200).json({ success: true, task });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
+
+// // Delete an item
+// export const deleteUserListing = async (req, res) => {
+//   try {
+//     const { id } = req.params;
+
+//     // Find the user based on their authentication (req.user._id) and populate their items
+//     const user = await User.findById(req.user._id).populate("items");
+
+//     // Find the item to delete in the user's items
+//     const itemToDelete = user.items.find((item) => item.id.toString() === id);
+
+//     if (!itemToDelete) {
+//       return res.status(404).json({
+//         success: false,
+//         message: "Item not found or you don't have permission to delete it",
+//       });
+//     }
+
+//     // Delete the item from Cloudinary
+//     await cloudinary.v2.uploader.destroy(itemToDelete.images[0].public_id);
+
+//     // Remove the item from the user's items
+//     user.items.remove(itemToDelete);
+
+//     // Save the user to persist the changes
+//     await user.save();
+
+//     res
+//       .status(200)
+//       .json({ success: true, message: "Item removed successfully" });
+//   } catch (error) {
+//     res.status(500).json({ success: false, message: error.message });
+//   }
+// };
 
 export const updateTask = async (req, res) => {
   try {
@@ -312,11 +493,11 @@ export const resetPassword = async (req, res) => {
 // Add a new controller function for posting items use cloudinary define above
 export const postItem = async (req, res) => {
   try {
-    const { title, price, categoryId, description } = req.body;
-    const image = req.files.image.tempFilePath;
+    const { title, price, category, description } = req.body;
+    const image = req.files && req.files.image && req.files.image.tempFilePath;
 
     // Validate that all required fields are provided
-    if (!title || !price || !categoryId || !description || !image) {
+    if (!title || !price || !category || !description || !image) {
       return res.status(400).json({
         success: false,
         message: "Please provide all required fields",
@@ -337,161 +518,100 @@ export const postItem = async (req, res) => {
     };
 
     // Add the image object to the user's item
-    const newItem = {
+    const newItem = new Item({
       title,
       price,
-      categoryId,
+      category,
       description,
       images: [imageObject], // Add the image to the 'images' array
       createdAt: new Date(Date.now()),
-    };
+    });
 
-    user.items.push(newItem);
+    // Add the new item to the user's items array
+
+    await newItem.save();
+
+    user.items.push(newItem._id);
 
     await user.save();
 
     res.status(200).json({ success: true, message: "Item added successfully" });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    console.error("Error in postItem:", error);
+    res.status(500).json({ success: false, message: "Internal server error" });
   }
 };
 
-// Add a new controller function for getting items
+// Add a new controller function for getting all items
 export const getAllItems = async (req, res) => {
   try {
-    // Find the user by their ID
-    const user = await User.findById(req.user._id);
+    // Get all items from the database
+    const items = await Item.find({});
 
-    // Check if the user exists and has items
-    if (!user || !user.items || user.items.length === 0) {
-      return res
-        .status(404)
-        .json({ success: false, message: "No items found" });
-    }
-
-    // Extract the items from the user's data
-    const items = user.items;
-
-    // Return the list of items in the response
     res.status(200).json({ success: true, items });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
-// Add a new controller function for getting a single item
+//Add a new controller function for getting a single item
 export const getSingleItem = async (req, res) => {
   try {
-    // Find the user by their ID
-    const user = await User.findById(req.user._id);
-
-    // Check if the user exists and has items
-    if (!user || !user.items || user.items.length === 0) {
-      return res
-        .status(404)
-        .json({ success: false, message: "No items found" });
-    }
-
-    // Extract the items from the user's data
-    const items = user.items;
-
-    // Find the item with the specified ID
-    const item = items.find((item) => item._id.toString() === req.params.id);
-
-    // Check if the item exists
-    if (!item) {
-      return res.status(404).json({ success: false, message: "No item found" });
-    }
-
-    // Return the item in the response
-    res.status(200).json({ success: true, item });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-// Add a new controller function for updating items
-export const updateItem = async (req, res) => {
-  try {
-    const { title, price, categoryId, description } = req.body;
-
-    // Validate that all required fields are provided
-    if (!title || !price || !categoryId || !description) {
-      return res.status(400).json({
-        success: false,
-        message: "Please provide all required fields",
-      });
-    }
-
-    // Find the user by their ID
-    const user = await User.findById(req.user._id);
-
-    // Check if the user exists and has items
-    if (!user || !user.items || user.items.length === 0) {
-      return res
-        .status(404)
-        .json({ success: false, message: "No items found" });
-    }
-
-    // Extract the items from the user's data
-    const items = user.items;
-
-    // Find the item with the specified ID
-    const item = items.find((item) => item._id.toString() === req.params.id);
-
-    // Check if the item exists
-    if (!item) {
-      return res.status(404).json({ success: false, message: "No item found" });
-    }
-
-    // Update the item with the new data
-    item.title = title;
-    item.price = price;
-    item.categoryId = categoryId;
-    item.description = description;
-
-    // Save the updated user data
-    await user.save();
-
-    // Return the updated item in the response
-    res.status(200).json({ success: true, item });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-// Add a new controller function for deleting items from the server
-export const deleteItem = async (req, res) => {
-  try {
+    // Get the item ID from the request parameters
     const { itemId } = req.params;
 
-    // Find the user by their ID
-    const user = await User.findById(req.user._id);
+    // Get the item from the database
+    const item = await Item.findById(itemId);
 
-    // Check if the user exists and has items
-    if (!user || !user.items || user.items.length === 0) {
-      return res
-        .status(404)
-        .json({ success: false, message: "No items found" });
-    }
+    res.status(200).json({ success: true, item });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
 
-    // Find the index of the item to delete by comparing item IDs
-    const itemIndex = user.items.findIndex(
-      (item) => item._id.toString() === itemId
-    );
+// Add a new controller function for updating an item
+export const updateItem = async (req, res) => {
+  try {
+    // Get the item ID from the request parameters
+    const { itemId } = req.params;
 
-    // Check if the item was found
-    if (itemIndex === -1) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Item not found" });
-    }
+    // Get the updated details from the request body
+    const { title, price, category, description } = req.body;
 
-    // Remove the item from the user's items array
-    user.items.splice(itemIndex, 1);
+    // Get the item from the database
+    const item = await Item.findById(itemId);
 
-    // Save the user's updated data
-    await user.save();
+    // Update the item details
+    if (title) item.title = title;
+    if (price) item.price = price;
+    if (category) item.category = category;
+    if (description) item.description = description;
+
+    // Save the updated item to the database
+    await item.save();
+
+    res
+      .status(200)
+      .json({ success: true, message: "Item updated successfully" });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// Add a new controller function for deleting an item
+export const deleteItem = async (req, res) => {
+  try {
+    // Get the item ID from the request parameters
+    const { itemId } = req.params;
+
+    // Get the item from the database
+    const item = await Item.findById(itemId);
+
+    // Delete the item from Cloudinary
+    await cloudinary.v2.uploader.destroy(item.images[0].public_id);
+
+    // Delete the item from the database
+    await item.remove();
 
     res
       .status(200)
